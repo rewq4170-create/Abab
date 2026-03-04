@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Age of History: Hardcore Sandbox</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+
+        :root {
+            --bg: #050505;
+            --panel: #111111;
+            --accent: #ff0000;
+            --border: #222222;
+        }
+
+        body {
+            background: var(--bg);
+            color: #ffffff;
+            font-family: 'Roboto Mono', monospace;
+            margin: 0;
+            overflow: hidden;
+            touch-action: none;
+        }
+
+        .map-layer { width: 100vw; height: 100vh; background: #000; }
+        
+        /* Стиль провинций */
+        .province { 
+            stroke: #111; 
+            stroke-width: 0.1px; 
+            transition: opacity 0.1s;
+        }
+        .province:hover { opacity: 0.8; stroke: #fff; stroke-width: 0.5px; }
+        .selected { stroke: #00ffff !important; stroke-width: 1.5px !important; }
+        .neighbor-target { stroke: #ff0000 !important; stroke-width: 1px; }
+
+        /* Интерфейс */
+        .hud {
+            position: fixed;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .hud-top {
+            top: 0; left: 0; right: 0; height: 60px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 20px; pointer-events: auto;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .hud-bottom {
+            bottom: 0; left: 0; right: 0;
+            background: var(--panel);
+            border-top: 1px solid var(--border);
+            padding: 15px; pointer-events: auto;
+            display: grid; grid-template-columns: 1fr 1.5fr 1fr;
+            gap: 15px; max-height: 45vh; overflow-y: auto;
+        }
+
+        @media (max-width: 768px) {
+            .hud-bottom { grid-template-columns: 1fr; }
+        }
+
+        .stat-group { display: flex; flex-direction: column; }
+        .stat-label { font-size: 10px; color: #666; text-transform: uppercase; }
+        .stat-value { font-size: 14px; font-weight: bold; color: #00ff00; }
+
+        .btn {
+            background: #1a1a1a; border: 1px solid var(--border);
+            padding: 8px; font-size: 12px; font-weight: bold;
+            text-align: center; cursor: pointer; transition: 0.2s;
+            text-transform: uppercase;
+        }
+        .btn:hover { background: #222; border-color: #444; }
+        .btn-war { background: #440000; color: #ff0000; border-color: #660000; }
+        .btn-war:hover { background: #660000; }
+
+        .log {
+            font-size: 10px; color: #888;
+            height: 80px; overflow-y: auto;
+            border-left: 1px solid var(--border); padding-left: 10px;
+        }
+
+        .loader {
+            position: fixed; inset: 0; background: #000;
+            display: flex; align-items: center; justify-content: center; z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+
+<div id="loader" class="loader">
+    <div class="text-white font-bold tracking-widest text-xl">BOOTING WORLD_SIM...</div>
+</div>
+
+<div class="hud hud-top">
+    <div class="flex gap-6">
+        <div class="stat-group">
+            <span class="stat-label text-yellow-500">Казна ($)</span>
+            <span id="gold-total" class="stat-value text-yellow-500">0</span>
+        </div>
+        <div class="stat-group">
+            <span class="stat-label text-red-500">Армия (DIV)</span>
+            <span id="army-total" class="stat-value text-red-500">0</span>
+        </div>
+        <div class="stat-group">
+            <span class="stat-label">Дата</span>
+            <span id="game-date" class="stat-value text-white">01.01.1936</span>
+        </div>
+    </div>
+    <div id="player-status" class="font-bold text-sm tracking-widest uppercase text-cyan-400">Выберите страну</div>
+    <button onclick="endTurn()" class="btn bg-white text-black px-6 hover:bg-cyan-500 transition-colors">След. Ход</button>
+</div>
+
+<div id="map" class="map-layer"></div>
+
+<div class="hud hud-bottom">
+    <!-- Сводка провинции -->
+    <div class="border-r border-zinc-800 pr-4">
+        <h2 id="prov-name" class="text-xl font-bold uppercase mb-2">Мировая Карта</h2>
+        <div class="space-y-2 text-xs">
+            <div class="flex justify-between"><span>Владелец:</span> <span id="prov-owner" class="font-bold">-</span></div>
+            <div class="flex justify-between"><span>Население:</span> <span id="prov-pop" class="font-bold">-</span></div>
+            <div class="flex justify-between"><span>Экономика:</span> <span id="prov-eco" class="font-bold">-</span></div>
+            <div class="flex justify-between"><span>Инфраструктура:</span> <span id="prov-infra" class="font-bold">-</span></div>
+        </div>
+    </div>
+
+    <!-- Управление -->
+    <div class="flex flex-col gap-3">
+        <div class="grid grid-cols-2 gap-2">
+            <button onclick="investInfra()" class="btn">🏗️ Построить Дороги ($200)</button>
+            <button onclick="investEconomy()" class="btn">🏭 Индустрия ($300)</button>
+            <button onclick="recruitInfantry()" class="btn">💂 Нанять Дивизию ($150)</button>
+            <button onclick="suppressUnrest()" class="btn">🔇 Подавить бунт ($100)</button>
+        </div>
+        <button id="attack-btn" onclick="startAttack()" class="btn btn-war hidden">⚔️ Начать Вторжение</button>
+    </div>
+
+    <!-- Разведданные -->
+    <div class="log" id="game-log">
+        <div class="text-cyan-500 mb-2 font-bold uppercase">Журнал Штаба</div>
+    </div>
+</div>
+
+<script>
+    // Настройки движка
+    const CONFIG = {
+        PROVINCES_PER_COUNTRY: 8,
+        BASE_TAX: 0.1,
+        RECRUIT_COST: 150,
+        INFRA_COST: 200,
+        ECO_COST: 300
+    };
+
+    let game = {
+        turn: 1,
+        playerCountry: null,
+        provinces: [],
+        countries: new Map(),
+        selectedProv: null,
+        money: 1000,
+        manpower: 500
+    };
+
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    const svg = d3.select("#map").append("svg")
+        .attr("width", width).attr("height", height)
+        .call(d3.zoom().scaleExtent([1, 20]).on("zoom", (e) => g.attr("transform", e.transform)));
+
+    const g = svg.append("g");
+    const projection = d3.geoMercator().scale(width / 6).translate([width / 2, height / 1.5]);
+    const path = d3.geoPath().projection(projection);
+
+    async function init() {
+        try {
+            const worldData = await d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json");
+            const features = topojson.feature(worldData, worldData.objects.countries).features;
+
+            // Генератор провинций внутри стран
+            features.forEach((country, cIdx) => {
+                const countryId = country.id || country.properties.name;
+                const bounds = path.bounds(country);
+                const color = d3.interpolateRainbow(cIdx / features.length);
+
+                game.countries.set(countryId, {
+                    name: country.properties.name,
+                    color: color,
+                    treasury: 1000,
+                    army: 100
+                });
+
+                // Создаем виртуальные "провинции" внутри границ страны (генерация по сетке)
+                for (let i = 0; i < CONFIG.PROVINCES_PER_COUNTRY; i++) {
+                    const id = `${countryId}_${i}`;
+                    game.provinces.push({
+                        id: id,
+                        countryId: countryId,
+                        name: `${country.properties.name} - Район ${i+1}`,
+                        population: Math.floor(Math.random() * 1000000) + 100000,
+                        economy: Math.floor(Math.random() * 50) + 10,
+                        infra: Math.floor(Math.random() * 5) + 1,
+                        army: Math.floor(Math.random() * 20),
+                        feature: country, // Для отрисовки используем родительский контур (упрощение для производительности)
+                        color: color
+                    });
+                }
+            });
+
+            // Отрисовка
+            g.selectAll(".country")
+                .data(features)
+                .enter().append("path")
+                .attr("d", path)
+                .attr("class", "province")
+                .attr("fill", (d, i) => d3.interpolateViridis(i / features.length))
+                .attr("stroke", "#000")
+                .on("click", (e, d) => selectCountry(d, e.currentTarget));
+
+            document.getElementById('loader').style.display = 'none';
+            addLog("Двигатель запущен. Выберите страну для управления.");
+        } catch (err) {
+            console.error(err);
+        }
+    }
+
+    function selectCountry(data, el) {
+        const cId = data.id || data.properties.name;
+        const country = game.countries.get(cId);
+        
+        // Первый клик - выбор игрока
+        if (!game.playerCountry) {
+            game.playerCountry = cId;
+            document.getElementById('player-status').innerText = country.name;
+            document.getElementById('player-status').style.color = country.color;
+            addLog(`Вы взяли командование над ${country.name}`);
+        }
+
+        game.selectedProv = {
+            id: cId,
+            data: country,
+            meta: game.provinces.find(p => p.countryId === cId)
+        };
+
+        // UI
+        d3.selectAll(".province").classed("selected", false);
+        d3.select(el).classed("selected", true);
+
+        updateUI();
+    }
+
+    function updateUI() {
+        const sp = game.selectedProv;
+        if (!sp) return;
+
+        document.getElementById('prov-name').innerText = sp.data.name;
+        document.getElementById('prov-owner').innerText = sp.data.name;
+        document.getElementById('prov-pop').innerText = (sp.meta.population / 1000).toFixed(0) + " тыс.";
+        document.getElementById('prov-eco').innerText = sp.meta.economy;
+        document.getElementById('prov-infra').innerText = sp.meta.infra + "/10";
+
+        // Кнопка атаки
+        const attackBtn = document.getElementById('attack-btn');
+        if (sp.id !== game.playerCountry) {
+            attackBtn.classList.remove('hidden');
+        } else {
+            attackBtn.classList.add('hidden');
+        }
+
+        // Глобальные статы
+        document.getElementById('gold-total').innerText = Math.floor(game.money);
+        document.getElementById('army-total').innerText = game.manpower;
+    }
+
+    function endTurn() {
+        game.turn++;
+        
+        // Экономический цикл
+        const myCountry = game.countries.get(game.playerCountry);
+        const income = game.provinces
+            .filter(p => p.countryId === game.playerCountry)
+            .reduce((acc, p) => acc + (p.economy * 2 * (p.infra / 2)), 0);
+        
+        game.money += income;
+        
+        // Случайные события
+        if (Math.random() > 0.8) {
+            const events = [
+                { t: "Засуха", m: -100, log: "Неурожай снизил доходы." },
+                { t: "Индустриализация", m: 200, log: "Новые заводы открыты!" }
+            ];
+            const e = events[Math.floor(Math.random() * events.length)];
+            game.money += e.m;
+            addLog(`СОБЫТИЕ: ${e.log}`);
+        }
+
+        // Обновление даты
+        const d = new Date(1936, game.turn - 1, 1);
+        document.getElementById('game-date').innerText = d.toLocaleDateString('ru-RU');
+
+        addLog(`Ход ${game.turn} завершен. Доход: +${income.toFixed(0)}$`);
+        updateUI();
+    }
+
+    // Действия
+    function investInfra() {
+        if (game.money < CONFIG.INFRA_COST) return addLog("Недостаточно денег!");
+        game.money -= CONFIG.INFRA_COST;
+        game.selectedProv.meta.infra = Math.min(10, game.selectedProv.meta.infra + 1);
+        addLog(`Построены дороги в ${game.selectedProv.data.name}`);
+        updateUI();
+    }
+
+    function recruitInfantry() {
+        if (game.money < CONFIG.RECRUIT_COST) return addLog("Недостаточно денег!");
+        game.money -= CONFIG.RECRUIT_COST;
+        game.manpower += 10;
+        addLog(`Сформирована новая дивизия.`);
+        updateUI();
+    }
+
+    function startAttack() {
+        const target = game.selectedProv;
+        const playerArmy = game.manpower;
+        const targetArmy = target.data.army;
+
+        addLog(`Начало операции против ${target.data.name}...`);
+
+        // Математика боя: сила = численность * рандом-фактор (снабжение)
+        const pPower = playerArmy * (0.5 + Math.random());
+        const tPower = targetArmy * (0.8 + Math.random());
+
+        if (pPower > tPower) {
+            const losses = Math.floor(targetArmy * 0.3);
+            game.manpower -= losses;
+            addLog(`ПОБЕДА! ${target.data.name} оккупирована. Потери: ${losses} DIV.`);
+            
+            // Передача территории
+            target.data.name = `Оккупированная ${target.data.name}`;
+            d3.select(".selected").attr("fill", game.countries.get(game.playerCountry).color);
+        } else {
+            game.manpower = Math.floor(game.manpower * 0.5);
+            addLog(`КАТАСТРОФА! Наступление отбито. Потеряно 50% войск.`);
+        }
+        updateUI();
+    }
+
+    function addLog(msg) {
+        const log = document.getElementById('game-log');
+        const div = document.createElement('div');
+        div.className = "mb-1 border-l-2 border-zinc-700 pl-2 py-1";
+        div.innerHTML = `<span class="text-zinc-500">[${game.turn}]</span> ${msg}`;
+        log.prepend(div);
+    }
+
+    init();
+</script>
+</body>
+</html>
+
